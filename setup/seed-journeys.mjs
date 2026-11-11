@@ -67,7 +67,8 @@ for (let ago = days - 1; ago >= 0; ago--) {
         const r = rand();
         if (r < 0.12) { add(t + 15 * MIN, { phone: p, event: 'dropped', dropped_at: 'business_name', flow: FLOW.main }); continue; }
         if (r < 0.21) { add(t + between(17, 25) * MIN, { phone: p, event: 'dropped', dropped_at: 'product_needs', business, flow: FLOW.main }); continue; }
-        if (r < 0.27) continue; // stopped at the area / business type list
+        if (r < 0.24) { add(t + between(32, 40) * MIN, { phone: p, event: 'dropped', dropped_at: 'area', business, flow: FLOW.main }); continue; }
+        if (r < 0.27) { add(t + between(33, 42) * MIN, { phone: p, event: 'dropped', dropped_at: 'business_type', business, area: weighted(AREAS), flow: FLOW.main }); continue; }
 
         const team = teamOf(type);
         t += between(2, 9) * MIN;

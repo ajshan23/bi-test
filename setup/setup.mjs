@@ -218,7 +218,8 @@ const LEAD_CARDS = [
 ];
 
 // Lead journey: one document per lead in "journeys", built by POST /api/flowflex/journey
-// from the main intake flow and the two salesperson flows.
+// from the main intake flow and the two salesperson flows. Every intake question has a
+// 30-minute "no response" exit that records `dropped` with the question name.
 const has = (field) => ({ $cond: [{ $ifNull: [`$${field}`, false] }, 1, 0] });
 const minutesSince = (field) => ({ $divide: [{ $subtract: ['$$NOW', `$${field}`] }, 60000] });
 // Where each journey currently stands, in plain words. An intake that hasn't moved for an
@@ -228,8 +229,12 @@ const outcome = {
         branches: [
             { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'business_name'] }] }, then: 'Dropped at business name' },
             { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'product_needs'] }] }, then: 'Dropped at product needs' },
+            { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'area'] }] }, then: 'Dropped at area' },
+            { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'business_type'] }] }, then: 'Dropped at business type' },
             { case: { $eq: ['$stage', 'dropped'] }, then: 'Dropped in intake' },
-            { case: { $and: [{ $eq: ['$stage', 'in_intake'] }, { $gt: [minutesSince('started_at'), 60] }] }, then: 'Stopped at area / business type' },
+            // Every question now has a 30-min "no response" exit, so an intake idle for 2h+
+            // means a step wasn't recorded (e.g. the BI call failed).
+            { case: { $and: [{ $eq: ['$stage', 'in_intake'] }, { $gt: [minutesSince('started_at'), 120] }] }, then: 'Stopped in intake (not recorded)' },
             { case: { $eq: ['$stage', 'in_intake'] }, then: 'Answering intake now' },
             { case: { $eq: ['$stage', 'handed_over'] }, then: 'Handed over, intro not sent yet' },
             { case: { $eq: ['$stage', 'intro_sent'] }, then: 'Intro sent, waiting for customer' },
@@ -327,14 +332,30 @@ const JOURNEY_CARDS = [
 const DASHBOARDS = [
     { name: 'Flow events', description: 'Events sent by FlowFlex flows (success and no-response paths).', collection: 'events', cards: FLOW_EVENT_CARDS },
     { name: 'Incoming leads', description: 'WhatsApp leads from the intake flow: who completed it, where people stopped, and what they need.', collection: 'leads', cards: LEAD_CARDS },
-    { name: 'Lead journey', description: 'Every lead from the main-number intake to the salesperson: handover, customer reply, and whether the salesperson replied in time.', collection: 'journeys', cards: JOURNEY_CARDS },
+    // sync: on re-runs, update this dashboard's card queries in place (matched by card name).
+    { name: 'Lead journey', description: 'Every lead from the main-number intake to the salesperson: handover, customer reply, and whether the salesperson replied in time.', collection: 'journeys', cards: JOURNEY_CARDS, sync: true },
 ];
 
-async function ensureDashboard(databaseId, { name, description, collection, cards }) {
+async function syncCards(databaseId, dashboardId, { collection, cards }) {
+    const { dashcards } = await api('GET', `/dashboard/${dashboardId}`);
+    let updated = 0;
+    for (const spec of cards) {
+        const dc = dashcards.find((d) => d.card?.name === spec.name || d.card?.name === spec.renamedFrom);
+        if (!dc) continue;
+        const dataset_query = { database: databaseId, type: 'native', native: { query: spec.query, collection } };
+        if (dc.card.dataset_query?.native?.query === spec.query && dc.card.name === spec.name) continue;
+        await api('PUT', `/card/${dc.card_id}`, { name: spec.name, dataset_query, visualization_settings: spec.viz ?? {} });
+        updated++;
+    }
+    return updated;
+}
+
+async function ensureDashboard(databaseId, { name, description, collection, cards, sync }) {
     const dashboards = await api('GET', '/dashboard');
     let dashboard = dashboards.find((d) => d.name === name && !d.archived);
     if (dashboard) {
-        console.log(`Dashboard "${name}" already exists (id ${dashboard.id}); leaving it as is.`);
+        const updated = sync ? await syncCards(databaseId, dashboard.id, { collection, cards }) : 0;
+        console.log(`Dashboard "${name}" already exists (id ${dashboard.id}); ${sync ? `updated ${updated} card queries` : 'leaving it as is'}.`);
         return dashboard.id;
     }
     console.log(`Building the "${name}" dashboard…`);
