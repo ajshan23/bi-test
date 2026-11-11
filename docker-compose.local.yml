@@ -1,0 +1,8 @@
+# Local run: no Caddy; Metabase on :3030, the API on :4080.
+services:
+  api:
+    ports:
+      - "4080:4000"
+  metabase:
+    ports:
+      - "3030:3000"

@@ -1,0 +1,14 @@
+{$DOMAIN} {
+	encode gzip
+
+	# Flow events API. Metabase owns every other /api/* path, so ours lives
+	# under /api/flowflex/ to avoid clashing with it.
+	handle /api/flowflex/* {
+		reverse_proxy api:4000
+	}
+
+	# Everything else is Metabase (dashboards, its own /api, public links).
+	handle {
+		reverse_proxy metabase:3000
+	}
+}

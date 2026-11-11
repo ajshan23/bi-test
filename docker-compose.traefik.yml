@@ -1,0 +1,34 @@
+# Server with an existing Traefik (flowflex-dev-v2): network "proxy",
+# entrypoint "websecure", cert resolver "le". Do NOT use --profile proxy here.
+#
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.traefik.yml
+#   docker compose up -d --build
+#
+# Only api and metabase join "proxy"; mongo and Postgres stay private.
+
+services:
+  api:
+    networks: [default, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.insights-api.rule=Host(`${DOMAIN}`) && PathPrefix(`/api/flowflex`)
+      - traefik.http.routers.insights-api.entrypoints=websecure
+      - traefik.http.routers.insights-api.tls.certresolver=le
+      - traefik.http.routers.insights-api.priority=100
+      - traefik.http.services.insights-api.loadbalancer.server.port=4000
+
+  metabase:
+    networks: [default, proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.insights-mb.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.insights-mb.entrypoints=websecure
+      - traefik.http.routers.insights-mb.tls.certresolver=le
+      - traefik.http.routers.insights-mb.priority=10
+      - traefik.http.services.insights-mb.loadbalancer.server.port=3000
+
+networks:
+  proxy:
+    external: true
