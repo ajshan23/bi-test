@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { MongoClient } from 'mongodb';
 import { MAX_BATCH, normalizeEvent } from './event.js';
 import { normalizeLead } from './lead.js';
+import { EVENTS, journeyUpdate, normalizeJourneyEvent } from './journey.js';
 
 const { PORT = 4000, MONGO_URL, API_KEY } = process.env;
 if (!MONGO_URL || !API_KEY) {
@@ -14,11 +15,18 @@ const client = new MongoClient(MONGO_URL);
 await client.connect();
 const events = client.db().collection('events');
 const leads = client.db().collection('leads');
-// Idempotent; also creates the leads collection so Metabase can see it.
+const journeys = client.db().collection('journeys');
+const journeyEvents = client.db().collection('journey_events');
+// Idempotent; also creates the collections so Metabase can see them.
 await Promise.all([
     leads.createIndex({ occurred_at: -1 }),
     leads.createIndex({ stage: 1, occurred_at: -1 }),
     leads.createIndex({ phone: 1, occurred_at: -1 }),
+    journeys.createIndex({ phone: 1, started_at: -1 }),
+    journeys.createIndex({ stage: 1, started_at: -1 }),
+    journeys.createIndex({ started_at: -1 }),
+    journeyEvents.createIndex({ received_at: -1 }),
+    journeyEvents.createIndex({ phone: 1, occurred_at: -1 }),
 ]);
 
 const app = express();
@@ -82,6 +90,26 @@ router.get('/leads', requireKey, async (req, res) => {
     for (const key of ['stage', 'area', 'business_type', 'phone']) if (req.query[key]) filter[key] = String(req.query[key]);
     const docs = await leads.find(filter).sort({ occurred_at: -1 }).limit(limit).toArray();
     res.json({ ok: true, count: docs.length, leads: docs });
+});
+
+// One step of a lead's journey (intake flow → salesperson flow). See journey.js.
+router.post('/journey', requireKey, async (req, res) => {
+    const { doc, error } = normalizeJourneyEvent(req.body);
+    if (error) return res.status(400).json({ ok: false, error });
+    await journeyEvents.insertOne(doc);
+    const update = journeyUpdate(doc);
+    const journey = doc.event === 'intake_started'
+        ? await journeys.insertOne({}).then(({ insertedId }) => journeys.findOneAndUpdate({ _id: insertedId }, update, { returnDocument: 'after' }))
+        : await journeys.findOneAndUpdate({ phone: doc.phone }, update, { sort: { started_at: -1 }, upsert: true, returnDocument: 'after' });
+    res.status(201).json({ ok: true, journey: journey?._id, stage: journey?.stage });
+});
+
+router.get('/journeys', requireKey, async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 200);
+    const filter = {};
+    for (const key of ['stage', 'team', 'phone']) if (req.query[key]) filter[key] = String(req.query[key]).replace(/^\+/, '');
+    const docs = await journeys.find(filter).sort({ started_at: -1 }).limit(limit).toArray();
+    res.json({ ok: true, count: docs.length, events: Object.keys(EVENTS), journeys: docs });
 });
 
 app.use('/api/flowflex', router);

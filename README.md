@@ -12,7 +12,7 @@ Flow (API node) --POST /api/flowflex/events--> api --> MongoDB <-- Metabase (rea
 | `api` | Node/Express. Accepts flow events with an API key and stores them. |
 | `mongo` | MongoDB 7. Users: `api` (read/write), `metabase` (read only). |
 | `metabase` | Metabase v0.64.6, settings kept in Postgres (`metabase-db`). |
-| `metabase-setup` | One-shot: creates the admin, connects Mongo, builds the **Flow events** dashboard and its public link. |
+| `metabase-setup` | One-shot: creates the admin, connects Mongo, builds the **Flow events**, **Incoming leads** and **Lead journey** dashboards and their public links. |
 | `caddy` | HTTPS for the domain (production only, `--profile proxy`). |
 
 Images are Debian-based (`node:22-bookworm-slim`, `postgres:16-bookworm`):
@@ -27,9 +27,35 @@ All routes live under `/api/flowflex/` (Metabase owns every other `/api/*` path)
 | `GET` | `/api/flowflex/health` | none | `{ "ok": true }` when Mongo is reachable |
 | `POST` | `/api/flowflex/events` | `x-api-key` | Store one event, or an array of up to 100 |
 | `GET` | `/api/flowflex/events?limit=20&outcome=no_response` | `x-api-key` | Latest events (filters: `event`, `outcome`, `worker`) |
-
 | `POST` | `/api/flowflex/leads` | `x-api-key` | Store one incoming lead (one per conversation) |
 | `GET` | `/api/flowflex/leads?limit=20&stage=dropped` | `x-api-key` | Latest leads (filters: `stage`, `area`, `business_type`, `phone`) |
+| `POST` | `/api/flowflex/journey` | `x-api-key` | One step of a lead's journey (main flow → salesperson flow) |
+| `GET` | `/api/flowflex/journeys?stage=salesperson_missed` | `x-api-key` | Latest journeys (filters: `stage`, `team`, `phone`) |
+
+### Lead journey (Lead journey dashboard)
+
+The three Deepak flows (main intake + HoReCa and Retail salesperson flows) each carry
+"BI:" API nodes that post one event. The API keeps one document per lead in `journeys`,
+matched by phone; `intake_started` opens a new journey and every later event updates
+the newest one. Raw events are kept in `journey_events`.
+
+| Event | Sent from | Stage after |
+|---|---|---|
+| `intake_started` | main flow, right after the trigger | `in_intake` |
+| `dropped` (+ `dropped_at`) | main flow, no-reply paths | `dropped` |
+| `handed_over` (+ answers, `category`) | main flow, after the lead note | `handed_over` |
+| `sales_started` (+ `team`) | salesperson flow, after its trigger | `intro_sent` |
+| `customer_replied` / `customer_no_reply` | salesperson flow, template branches | `waiting_for_salesperson` / `customer_no_reply` |
+| `agent_replied` / `agent_no_reply` | salesperson flow, wait-for-reply paths | `salesperson_replied` / `salesperson_missed` |
+
+```json
+{ "phone": "{{tg.phone}}", "name": "{{tg.name}}", "event": "customer_replied", "team": "HoReCa", "flow": "Deepak - sales flow" }
+```
+
+- Stages only move forward; `team` is derived from `category` (Hotel, Restaurant / Café, Airline / Catering → HoReCa; else Retail) unless sent.
+- `agent_replied` stores `salesperson_reply_minutes` (time since the customer replied).
+- Every BI node continues to the original next node on success, HTTP error and request failure, so the dashboard can never block a customer.
+- Demo data: `API_URL=… API_KEY=… node setup/seed-journeys.mjs` (tagged `extra.demo = "true"`).
 
 ### Leads (Incoming leads dashboard)
 

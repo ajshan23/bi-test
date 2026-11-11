@@ -217,9 +217,117 @@ const LEAD_CARDS = [
     },
 ];
 
+// Lead journey: one document per lead in "journeys", built by POST /api/flowflex/journey
+// from the main intake flow and the two salesperson flows.
+const has = (field) => ({ $cond: [{ $ifNull: [`$${field}`, false] }, 1, 0] });
+const minutesSince = (field) => ({ $divide: [{ $subtract: ['$$NOW', `$${field}`] }, 60000] });
+// Where each journey currently stands, in plain words. An intake that hasn't moved for an
+// hour stopped at one of the list questions (they have no "no reply" exit in the flow).
+const outcome = {
+    $switch: {
+        branches: [
+            { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'business_name'] }] }, then: 'Dropped at business name' },
+            { case: { $and: [{ $eq: ['$stage', 'dropped'] }, { $eq: ['$dropped_at', 'product_needs'] }] }, then: 'Dropped at product needs' },
+            { case: { $eq: ['$stage', 'dropped'] }, then: 'Dropped in intake' },
+            { case: { $and: [{ $eq: ['$stage', 'in_intake'] }, { $gt: [minutesSince('started_at'), 60] }] }, then: 'Stopped at area / business type' },
+            { case: { $eq: ['$stage', 'in_intake'] }, then: 'Answering intake now' },
+            { case: { $eq: ['$stage', 'handed_over'] }, then: 'Handed over, intro not sent yet' },
+            { case: { $eq: ['$stage', 'intro_sent'] }, then: 'Intro sent, waiting for customer' },
+            { case: { $eq: ['$stage', 'customer_no_reply'] }, then: "Customer didn't reply to salesperson" },
+            { case: { $eq: ['$stage', 'waiting_for_salesperson'] }, then: 'Waiting for salesperson' },
+            { case: { $eq: ['$stage', 'salesperson_missed'] }, then: 'Salesperson missed (alert sent)' },
+            { case: { $eq: ['$stage', 'salesperson_replied'] }, then: 'Salesperson replied' },
+        ],
+        default: '$stage',
+    },
+};
+const journeyDay = { $dateTrunc: { date: '$started_at', unit: 'day' } };
+const count = (name, field) => ({ name, display: 'scalar', size: [4, 3], query: pipe([{ $group: { _id: null, n: { $sum: field ? has(field) : 1 } } }, { $project: { _id: 0, [name.toLowerCase().replace(/\W+/g, '_')]: '$n' } }]) });
+const JOURNEY_CARDS = [
+    count('Leads started'),
+    count('Handed to salesperson', 'handed_over_at'),
+    count('Customer replied', 'customer_replied_at'),
+    count('Salesperson replied', 'salesperson_replied_at'),
+    count('Salesperson missed', 'salesperson_missed_at'),
+    {
+        name: 'Avg salesperson reply (min)', display: 'scalar', size: [4, 3],
+        query: pipe([{ $match: { salesperson_reply_minutes: { $ne: null } } }, { $group: { _id: null, minutes: { $avg: '$salesperson_reply_minutes' } } }, { $project: { _id: 0, minutes: { $round: ['$minutes', 1] } } }]),
+    },
+    {
+        name: 'Lead funnel', display: 'funnel', size: [12, 8],
+        query: pipe([
+            { $group: { _id: null, a: { $sum: 1 }, b: { $sum: has('handed_over_at') }, c: { $sum: has('intro_sent_at') }, d: { $sum: has('customer_replied_at') }, e: { $sum: has('salesperson_replied_at') } } },
+            { $project: { _id: 0, steps: [
+                { step: '1. Started intake', leads: '$a' },
+                { step: '2. Handed to salesperson', leads: '$b' },
+                { step: '3. Salesperson intro sent', leads: '$c' },
+                { step: '4. Customer replied', leads: '$d' },
+                { step: '5. Salesperson replied', leads: '$e' },
+            ] } },
+            { $unwind: '$steps' },
+            { $replaceRoot: { newRoot: '$steps' } },
+        ]),
+        viz: { 'funnel.dimension': 'step', 'funnel.metric': 'leads' },
+    },
+    {
+        name: 'Where every lead stands', display: 'row', size: [12, 8],
+        query: pipe([{ $group: { _id: outcome, leads: { $sum: 1 } } }, { $project: { _id: 0, status: '$_id', leads: 1 } }, { $sort: { leads: -1 } }]),
+        viz: { 'graph.dimensions': ['status'], 'graph.metrics': ['leads'] },
+    },
+    {
+        name: 'Salesperson performance', display: 'table', size: [24, 4],
+        query: pipe([
+            { $match: { team: { $ne: null } } },
+            { $group: {
+                _id: '$team', handed_over: { $sum: has('handed_over_at') }, customer_replied: { $sum: has('customer_replied_at') },
+                salesperson_replied: { $sum: has('salesperson_replied_at') }, missed: { $sum: has('salesperson_missed_at') },
+                avg_reply_min: { $avg: '$salesperson_reply_minutes' },
+            } },
+            { $project: {
+                _id: 0, team: '$_id', handed_over: 1, customer_replied: 1, salesperson_replied: 1, missed: 1,
+                reply_rate: { $cond: [{ $eq: ['$customer_replied', 0] }, null, { $divide: ['$salesperson_replied', '$customer_replied'] }] },
+                avg_reply_min: { $round: ['$avg_reply_min', 1] },
+            } },
+            { $sort: { team: 1 } },
+        ]),
+        viz: { column_settings: { '["name","reply_rate"]': { number_style: 'percent', decimals: 0 } } },
+    },
+    {
+        name: 'Needs attention: customer waiting on salesperson (last 7 days)', display: 'table', size: [24, 6],
+        query: pipe([
+            { $match: { stage: { $in: ['salesperson_missed', 'waiting_for_salesperson'] }, $expr: { $lt: [minutesSince('customer_replied_at'), 7 * 24 * 60] } } },
+            { $sort: { customer_replied_at: -1 } },
+            { $project: { _id: 0, customer_replied: '$customer_replied_at', waiting_hours: { $round: [{ $divide: [minutesSince('customer_replied_at'), 60] }, 1] }, name: 1, phone: 1, business: 1, team: 1, category: 1, needs: 1, status: outcome } },
+        ]),
+    },
+    {
+        name: 'Leads per day by outcome', display: 'bar', size: [16, 7],
+        query: pipe([
+            { $group: { _id: { day: journeyDay, status: outcome }, leads: { $sum: 1 } } },
+            { $project: { _id: 0, day: '$_id.day', status: '$_id.status', leads: 1 } },
+            { $sort: { day: 1 } },
+        ]),
+        viz: { 'graph.dimensions': ['day', 'status'], 'graph.metrics': ['leads'], 'stackable.stack_type': 'stacked', 'graph.x_axis.title_text': 'Day', 'graph.y_axis.title_text': 'Leads' },
+    },
+    {
+        name: 'Handed over by business type', display: 'pie', size: [8, 7],
+        query: pipe([{ $match: { handed_over_at: { $ne: null } } }, { $group: { _id: { $ifNull: ['$category', 'Not given'] }, leads: { $sum: 1 } } }, { $project: { _id: 0, business_type: '$_id', leads: 1 } }, { $sort: { leads: -1 } }]),
+        viz: { 'pie.dimension': 'business_type', 'pie.metric': 'leads' },
+    },
+    {
+        name: 'All leads', display: 'table', size: [24, 9],
+        query: pipe([
+            { $sort: { started_at: -1 } },
+            { $limit: 2000 },
+            { $project: { _id: 0, started: '$started_at', name: 1, phone: 1, business: 1, category: 1, team: 1, area: 1, needs: 1, status: outcome, handed_over: '$handed_over_at', customer_replied: '$customer_replied_at', salesperson_replied: '$salesperson_replied_at', reply_min: '$salesperson_reply_minutes' } },
+        ]),
+    },
+];
+
 const DASHBOARDS = [
     { name: 'Flow events', description: 'Events sent by FlowFlex flows (success and no-response paths).', collection: 'events', cards: FLOW_EVENT_CARDS },
     { name: 'Incoming leads', description: 'WhatsApp leads from the intake flow: who completed it, where people stopped, and what they need.', collection: 'leads', cards: LEAD_CARDS },
+    { name: 'Lead journey', description: 'Every lead from the main-number intake to the salesperson: handover, customer reply, and whether the salesperson replied in time.', collection: 'journeys', cards: JOURNEY_CARDS },
 ];
 
 async function ensureDashboard(databaseId, { name, description, collection, cards }) {
